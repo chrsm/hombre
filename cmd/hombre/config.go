@@ -1,9 +1,8 @@
-package hombre
+package main
 
 import (
 	"encoding/json"
 	"os"
-	"regexp"
 )
 
 type Config struct {
@@ -27,19 +26,7 @@ type LuaScript struct {
 	Commands []string `json:"commands"` // eg spin, roulette..
 }
 
-func (ls LuaScript) acceptsCommand(cmd string) bool {
-	for i := range ls.Commands {
-		if ls.Commands[i] == "*" { // wildcard
-			return true
-		} else if ok, err := regexp.MatchString("^!"+regexp.QuoteMeta(ls.Commands[i]), cmd); ok && err == nil {
-			return true
-		}
-	}
-
-	return false
-}
-
-func LoadConfig(fileName string) (*Config, error) {
+func loadConfig(fileName string) (*Config, error) {
 	f, err := os.Open(fileName)
 	defer f.Close()
 	if err != nil {

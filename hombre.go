@@ -1,20 +1,25 @@
 package hombre
 
 import (
-	"fmt"
+	"log"
+	"regexp"
 	"sync"
 
-	"github.com/layeh/gopher-luar"
-	"github.com/nlopes/slack"
+	"github.com/slack-go/slack"
+	"layeh.com/gopher-luar"
 )
 
 type Hombre struct {
-	Conf *Config
-	API  *slack.Client
+	API *slack.Client
 
+	running      bool
 	sync.Mutex   // embedded
 	serviceChans map[string]service
 	done         chan bool
+
+	path     string
+	scripts  []Script
+	services []Script
 }
 
 type service struct {
@@ -23,13 +28,48 @@ type service struct {
 }
 
 // New creates a new Donut Bot instance and sets it up for work.
-func New(c *Config) *Hombre {
-	return &Hombre{
-		Conf:         c,
-		API:          slack.New(c.Token),
+func New(token string, opts ...Option) *Hombre {
+	h := &Hombre{
+		API:          slack.New(token),
 		serviceChans: make(map[string]service),
 		done:         make(chan bool),
 	}
+
+	for i := range opts {
+		opts[i](h)
+	}
+
+	return h
+}
+
+type Option func(*Hombre)
+
+func OptionLuaPath(path string) Option {
+	return func(h *Hombre) {
+		h.path = path
+	}
+}
+
+type Script struct {
+	Path     string
+	Name     string
+	Commands []string
+}
+
+func (h *Hombre) AddScript(s Script) {
+	if h.running {
+		panic("can't add a script to a running instance atm")
+	}
+
+	h.scripts = append(h.scripts, s)
+}
+
+func (h *Hombre) AddService(s Script) {
+	if h.running {
+		panic("can't add a service to a running instance atm")
+	}
+
+	h.services = append(h.services)
 }
 
 // Listen starts the Donut Bot client and lua scripts.
@@ -39,12 +79,17 @@ func (h *Hombre) Listen() {
 
 	rtm := h.API.NewRTM()
 	go rtm.ManageConnection()
+	log.Printf("hombre: rtm running")
 
 	// Initialize scripts that are "long running", one per goroutine (they need their own lua instance).
 	// Each of these inits should return a channel on which they accept *slack.MessageEvent(s)
-	for i := range h.Conf.Lua.Services {
-		go func(svc LuaScript) {
+	for i := range h.services {
+		go func(svc Script) {
+			log.Printf("hombre: starting svc(%s)", svc.Name)
 			vm := h.makeLuaVM()
+
+			cpath := vm.GetGlobal("package.path")
+			vm.SetGlobal("package.path", luar.New(vm, cpath.String()+";/?.lua;/?/init.lua"))
 
 			// register the message in the global scope of the script;
 			// this is how this script will receive messages
@@ -63,13 +108,16 @@ func (h *Hombre) Listen() {
 			h.Unlock()
 
 			// run the script
-			if err := vm.DoFile(h.Conf.Lua.Path + "/" + svc.Name + ".lua"); err != nil {
+			log.Printf("hombre: running service script")
+			if err := vm.DoFile(h.path + "/" + svc.Name + ".lua"); err != nil {
 				panic(err)
 			}
 
+			log.Printf("hombre: shutting down lua vm for svc(%s)", svc.Name)
 			vm.Close()
+
 			h.serviceChans[svc.Name].done <- true
-		}(h.Conf.Lua.Services[i])
+		}(h.services[i])
 	}
 
 proc:
@@ -77,49 +125,54 @@ proc:
 		select {
 		case <-h.done:
 			// we're done here
-			fmt.Println("Goodbye!")
+			log.Println("Goodbye!")
 			break proc
 		case msg := <-rtm.IncomingEvents:
 			switch ev := msg.Data.(type) {
 			case *slack.DisconnectedEvent:
-				fmt.Println("We got disconnected...reconnecting")
-				rtm.Reconnect()
+				log.Println("We got disconnected...should reconnect automagically")
 			case *slack.ConnectedEvent:
-				fmt.Println("Connected!")
+				log.Println("Connected!")
 			case *slack.MessageEvent:
-				fmt.Printf("[%s] %s: %s\n", ev.Channel, ev.User, ev.Text)
+				log.Printf("[%s] %s: %s\n", ev.Channel, ev.User, ev.Text)
 
 				// Services have the highest priority here
-				for i := range h.Conf.Lua.Services {
-					svc := h.Conf.Lua.Services[i]
+				for i := range h.services {
+					svc := h.services[i]
 					if svc.acceptsCommand(ev.Text) {
 						h.serviceChans[svc.Name].msgs <- ev
 					}
 				}
 
 				// Check if any scripts want this message
-				for i := range h.Conf.Lua.Scripts {
-					scr := h.Conf.Lua.Scripts[i]
+				for i := range h.scripts {
+					scr := h.scripts[i]
 
 					if scr.acceptsCommand(ev.Text) {
 						go func(ev *slack.MessageEvent) {
+							log.Printf("executing script(%s)", scr.Name)
 							vm := h.makeLuaVM()
 
 							// set the message
 							vm.SetGlobal("msg", luar.New(vm, ev))
 							vm.SetGlobal("rtm", luar.New(vm, rtm))
 
-							if err := vm.DoFile(h.Conf.Lua.Path + "/" + scr.Name + ".lua"); err != nil {
-								fmt.Println(ev.Text, err)
+							if err := vm.DoFile(h.path + "/" + scr.Name + ".lua"); err != nil {
+								log.Println(ev.Text, err)
 							}
 
 							vm.Close()
 						}(ev)
 					}
 				}
-			case *slack.HelloEvent:
-				// nil
 			default:
+				log.Printf("event came in: %#v", msg)
+				log.Printf("event data: %#v", msg.Data)
+
+				if err, ok := msg.Data.(*slack.ConnectionErrorEvent); ok {
+					log.Printf("err occurred? %#v", err.ErrorObj)
+					panic("")
+				}
 				// nil
 			}
 		}
@@ -138,4 +191,16 @@ func (h *Hombre) Close() {
 	}
 
 	h.done <- true
+}
+
+func (s Script) acceptsCommand(cmd string) bool {
+	for i := range s.Commands {
+		if s.Commands[i] == "*" { // wildcard
+			return true
+		} else if ok, err := regexp.MatchString("^!"+regexp.QuoteMeta(s.Commands[i]), cmd); ok && err == nil {
+			return true
+		}
+	}
+
+	return false
 }

@@ -1,27 +1,43 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/chrsm/hombre"
+	"bits.chrsm.org/hombre"
 )
 
 func main() {
-	c, err := hombre.LoadConfig("config.json")
+	c, err := loadConfig("config.json")
 	if err != nil {
-		fmt.Println("Could not load config.json properly:", err)
+		log.Println("Could not load config.json properly:", err)
 		return
 	}
 
-	bot := hombre.New(c)
+	bot := hombre.New(c.Token, hombre.OptionLuaPath(c.Lua.Path))
+	for _, v := range c.Lua.Scripts {
+		bot.AddScript(hombre.Script{
+			Name:     v.Name,
+			Commands: v.Commands,
+		})
+	}
+
+	for _, v := range c.Lua.Services {
+		bot.AddService(hombre.Script{
+			Name:     v.Name,
+			Commands: v.Commands,
+		})
+	}
+
+	log.Printf("starting hombre..")
 	go bot.Listen()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	log.Printf("waiting for ctrl-c to quit :-)")
 	<-quit
 	bot.Close()
-	fmt.Println("See ya!")
+	log.Println("See ya!")
 }

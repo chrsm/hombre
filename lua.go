@@ -4,9 +4,9 @@ import (
 	"net/http"
 
 	"github.com/cjoudrey/gluahttp"
-	"github.com/layeh/gopher-luar"
 	"github.com/yuin/gluare"
 	"github.com/yuin/gopher-lua"
+	"layeh.com/gopher-luar"
 )
 
 func (h *Hombre) makeLuaVM() *lua.LState {
@@ -17,9 +17,8 @@ func (h *Hombre) makeLuaVM() *lua.LState {
 	l.PreloadModule("http", gluahttp.NewHttpModule(&http.Client{}).Loader) // http
 
 	l.SetGlobal("hombre", luar.New(l, h))
-	l.SetGlobal("conf", luar.New(l, h.Conf))
 	l.SetGlobal("slack", luar.New(l, h.API))
-	l.SetGlobal("luaWorkingDir", luar.New(l, h.Conf.Lua.Path))
+	l.SetGlobal("luaWorkingDir", luar.New(l, h.path))
 
 	return l
 }
